@@ -27,7 +27,8 @@ Usage: $(basename "$0") <options>
     -h, --help               Display help
     -v, --version            The chart-releaser version to use (default: $DEFAULT_CHART_RELEASER_VERSION)"
         --config             The path to the chart-releaser config file
-    -d, --charts-dir         The charts directory (default: charts)
+    -s, --single-mode        Tells the plugin the chart folder is the only chart to publish. Useful if your repo only contains one chart.
+    -d, --charts-dir         The chart(s) directory (default: charts, when in single-mode: chart)
     -u, --charts-repo-url    The GitHub Pages URL to the charts repo (default: https://<owner>.github.io/<repo>)
     -o, --owner              The repo owner
     -r, --repo               The repo name
@@ -37,12 +38,20 @@ EOF
 main() {
     local version="$DEFAULT_CHART_RELEASER_VERSION"
     local config=
-    local charts_dir=charts
+    local charts_dir=
     local owner=
     local repo=
+    local single_mode=false
     local charts_repo_url=
 
     parse_command_line "$@"
+    if [[ -z "${charts_dir:-}" ]]; then
+      if [[ -n "${single_mode:-}" ]]; then
+        charts_dir=chart
+      else
+        charts_dir=charts
+      fi 
+    fi
 
     : "${CR_TOKEN:?Environment variable CR_TOKEN must be set}"
 
@@ -54,33 +63,50 @@ main() {
     local latest_tag
     latest_tag=$(lookup_latest_tag)
 
-    echo "Discovering changed charts since '$latest_tag'..."
-    local changed_charts=()
-    readarray -t changed_charts <<< "$(lookup_changed_charts "$latest_tag")"
-
-    if [[ -n "${changed_charts[*]}" ]]; then
-        install_chart_releaser
-
-        rm -rf .cr-release-packages
-        mkdir -p .cr-release-packages
-
-        rm -rf .cr-index
-        mkdir -p .cr-index
-
-        for chart in "${changed_charts[@]}"; do
-            if [[ -d "$chart" ]]; then
-                package_chart "$chart"
-            else
-                echo "Chart '$chart' no longer exists in repo. Skipping it..."
-            fi
-        done
-
-        release_charts
-        update_index
-    else
+    if [[ -n "${single_mode}" ]]; then
+      echo "Discovering changes in chart since '$latest_tag'..."
+      if [[ -n "$(chart_changes "$latest_tag")" ]]; then
         echo "Nothing to do. No chart changes detected."
-    fi
+        exit
+      fi
+      install_chart_releaser
 
+      rm -rf .cr-release-packages
+      mkdir -p .cr-release-packages
+      rm -rf .cr-index
+      mkdir -p .cr-index
+
+      package_chart "$chart"
+      release_charts
+      update_index
+    else
+      echo "Discovering changed charts since '$latest_tag'..."
+      local changed_charts=()
+      readarray -t changed_charts <<< "$(lookup_changed_charts "$latest_tag")"
+
+      if [[ -n "${changed_charts[*]}" ]]; then
+          install_chart_releaser
+
+          rm -rf .cr-release-packages
+          mkdir -p .cr-release-packages
+
+          rm -rf .cr-index
+          mkdir -p .cr-index
+
+          for chart in "${changed_charts[@]}"; do
+              if [[ -d "$chart" ]]; then
+                  package_chart "$chart"
+              else
+                  echo "Chart '$chart' no longer exists in repo. Skipping it..."
+              fi
+          done
+
+          release_charts
+          update_index
+      else
+          echo "Nothing to do. No chart changes detected."
+      fi
+    fi
     popd > /dev/null
 }
 
@@ -151,6 +177,10 @@ parse_command_line() {
                     exit 1
                 fi
                 ;;
+            -s|--single-mode)
+                single_mode=1
+                exit
+                ;;
             *)
                 break
                 ;;
@@ -217,6 +247,14 @@ filter_charts() {
            echo "WARNING: $file is missing, assuming that '$chart' is not a Helm chart. Skipping." 1>&2
         fi
     done
+}
+
+chart_changes() {
+    local commit="$1"
+
+    local changed_files
+    changed_files=$(git diff --find-renames --name-only "$commit" -- "$charts_dir")
+    echo $changed_files
 }
 
 lookup_changed_charts() {
